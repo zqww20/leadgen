@@ -1,0 +1,824 @@
+import { useState, useMemo, useCallback, useRef } from "react";
+
+// ── helpers ──────────────────────────────────────────────────────────
+const CANADIAN_COUNTRIES = ["ca", "canada"];
+const EXCLUDE_KEYWORDS = [
+  "university", "college", "institut", "school", "hospital",
+  "health authority", "city of", "province of", "government",
+  "municipality", "crown", "nation of", "first nation",
+];
+const LARGE_CORP_KEYWORDS = [
+  "deloitte", "kpmg", "pwc", "ernst", "mckinsey", "accenture",
+  "ibm", "microsoft", "amazon", "google", "oracle", "sap",
+  "ellisdon", "aecon", "stantec", "wsp", "snc-lavalin", "jacobs",
+  "golder", "hatch",
+];
+
+const CHAMPION_TITLES_SRV = "proposal OR proposals OR bid OR bidding OR \"business development\" OR grants OR procurement OR contracts OR \"capture manager\" OR \"pursuit manager\"";
+const CHAMPION_TITLES_GD = "sales OR estimat OR contracts OR procurement OR \"business development\" OR \"account manager\" OR \"supply chain\"";
+const CHAMPION_TITLES_CNST = "estimat OR \"project manager\" OR \"business development\" OR procurement OR contracts OR \"preconstruction\" OR bid OR tender";
+
+const DECISION_TITLES = "owner OR founder OR CEO OR president OR \"managing director\" OR COO OR CFO OR \"vice president\" OR VP OR director OR \"general manager\" OR \"executive director\"";
+
+function normalizeProvince(p) {
+  if (!p) return "";
+  const map = {
+    on: "Ontario", ontario: "Ontario",
+    qc: "Quebec", quebec: "Quebec", québec: "Quebec",
+    bc: "British Columbia", "british columbia": "British Columbia",
+    ab: "Alberta", alberta: "Alberta",
+    mb: "Manitoba", manitoba: "Manitoba",
+    sk: "Saskatchewan", saskatchewan: "Saskatchewan",
+    ns: "Nova Scotia", "nova scotia": "Nova Scotia",
+    nb: "New Brunswick", "new brunswick": "New Brunswick",
+    nl: "Newfoundland and Labrador", "newfoundland and labrador": "Newfoundland and Labrador",
+    pe: "Prince Edward Island", "prince edward island": "Prince Edward Island", pei: "Prince Edward Island",
+    nt: "Northwest Territories", "northwest territories": "Northwest Territories",
+    nu: "Nunavut", nunavut: "Nunavut",
+    yt: "Yukon", yukon: "Yukon",
+  };
+  return map[p.toLowerCase().trim()] || p.trim();
+}
+
+function normalizeCompanyName(name) {
+  if (!name) return "";
+  return name
+    .replace(/\s+(inc\.?|ltd\.?|llc\.?|corp\.?|co\.?|limited|incorporated|corporation)$/i, "")
+    .replace(/[.,]+$/, "")
+    .trim();
+}
+
+function fuzzyMatch(a, b) {
+  const na = normalizeCompanyName(a).toLowerCase();
+  const nb = normalizeCompanyName(b).toLowerCase();
+  if (na === nb) return true;
+  if (na.length < 3 || nb.length < 3) return na === nb;
+  const shorter = na.length < nb.length ? na : nb;
+  const longer = na.length < nb.length ? nb : na;
+  return longer.includes(shorter) && shorter.length / longer.length > 0.7;
+}
+
+function isCanadian(country) {
+  if (!country) return true; // assume Canadian if missing
+  return CANADIAN_COUNTRIES.includes(country.toLowerCase().trim());
+}
+
+function isExcludedOrg(name) {
+  const lower = name.toLowerCase();
+  return EXCLUDE_KEYWORDS.some(k => lower.includes(k));
+}
+
+function isLargeCorp(name) {
+  const lower = name.toLowerCase();
+  return LARGE_CORP_KEYWORDS.some(k => lower.includes(k));
+}
+
+function getCategory(cat) {
+  if (!cat) return "unknown";
+  const c = cat.replace(/\*/g, "").replace(/\n/g, "").trim().toUpperCase();
+  if (c.includes("SRV") && c.includes("GD")) return "services_goods";
+  if (c.includes("SRV")) return "services";
+  if (c.includes("GD")) return "goods";
+  if (c.includes("CNST")) return "construction";
+  return "other";
+}
+
+function scoreCompany(company) {
+  let score = 50;
+  let reasons = [];
+
+  if (!isCanadian(company.country)) { score -= 40; reasons.push("Non-Canadian"); }
+  if (isExcludedOrg(company.name)) { score -= 30; reasons.push("Excluded org type"); }
+  if (isLargeCorp(company.name)) { score -= 20; reasons.push("Large corp"); }
+
+  // Prefer services
+  if (company.category === "services") { score += 15; reasons.push("Services"); }
+  else if (company.category === "construction") { score += 5; reasons.push("Construction"); }
+
+  // Contract size sweet spot ($10K - $2M)
+  const amt = company.totalAmount;
+  if (amt > 10000 && amt <= 500000) { score += 15; reasons.push("SMB contract size"); }
+  else if (amt > 500000 && amt <= 2000000) { score += 10; reasons.push("Mid contract size"); }
+  else if (amt > 2000000) { score -= 5; reasons.push("Large contract"); }
+  else if (amt === 0 || amt === 1) { score += 0; reasons.push("No amount listed"); }
+
+  // Province bonus for Atlantic Canada
+  if (["Nova Scotia", "New Brunswick", "Prince Edward Island", "Newfoundland and Labrador"].includes(company.province)) {
+    score += 5; reasons.push("Atlantic Canada");
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  let tier = score >= 70 ? "high" : score >= 45 ? "medium" : "low";
+  return { score, tier, reasons };
+}
+
+function getChampionTitles(category) {
+  if (category === "construction") return CHAMPION_TITLES_CNST;
+  if (category === "goods") return CHAMPION_TITLES_GD;
+  return CHAMPION_TITLES_SRV;
+}
+
+function buildLinkedInPeopleSearch(companyName, titles) {
+  const q = encodeURIComponent(`"${companyName}" ${titles}`);
+  return `https://www.linkedin.com/search/results/people/?keywords=${q}`;
+}
+
+function buildLinkedInCompanySearch(companyName) {
+  const q = encodeURIComponent(companyName);
+  return `https://www.linkedin.com/search/results/companies/?keywords=${q}`;
+}
+
+function buildGoogleContactSearch(companyName, city, province) {
+  const loc = [city, province].filter(Boolean).join(" ");
+  const q = encodeURIComponent(`"${companyName}" ${loc} contact OR about OR team`);
+  return `https://www.google.com/search?q=${q}`;
+}
+
+function buildGoogleProcurementSearch(companyName) {
+  const q = encodeURIComponent(`"${companyName}" tender OR grant OR RFP OR contract OR procurement`);
+  return `https://www.google.com/search?q=${q}`;
+}
+
+function buildGoogleWebsiteSearch(companyName, city) {
+  const q = encodeURIComponent(`"${companyName}" ${city || ""}`);
+  return `https://www.google.com/search?q=${q}`;
+}
+
+// ── CSV parsing ──────────────────────────────────────────────────────
+function parseCSV(text) {
+  const lines = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      if (inQuotes && text[i + 1] === '"') { current += '"'; i++; }
+      else { inQuotes = !inQuotes; }
+    } else if ((ch === "," || ch === "\n" || ch === "\r") && !inQuotes) {
+      if (ch === ",") {
+        lines.length === 0
+          ? (lines.push([current]), (current = ""))
+          : (lines[lines.length - 1].push(current), (current = ""));
+      } else {
+        if (ch === "\r" && text[i + 1] === "\n") i++;
+        if (current || (lines.length > 0 && lines[lines.length - 1])) {
+          if (lines.length === 0) lines.push([current]);
+          else lines[lines.length - 1].push(current);
+          current = "";
+          lines.push([]);
+        }
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current) {
+    if (lines.length === 0) lines.push([current]);
+    else lines[lines.length - 1].push(current);
+  }
+
+  if (lines.length < 2) return [];
+  const headers = lines[0].map(h => h.replace(/^\uFEFF/, "").trim());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].length < 2) continue;
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = (lines[i][idx] || "").trim(); });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function getField(row, ...partials) {
+  for (const key of Object.keys(row)) {
+    const lk = key.toLowerCase();
+    if (partials.some(p => lk.includes(p.toLowerCase()))) return row[key];
+  }
+  return "";
+}
+
+function processRows(rawRows) {
+  const companyMap = new Map();
+
+  for (const row of rawRows) {
+    const name = getField(row, "supplierLegalName") || "";
+    if (!name) continue;
+
+    const city = getField(row, "supplierAddressCity") || "";
+    const province = normalizeProvince(getField(row, "supplierAddressProvince"));
+    const country = getField(row, "supplierAddressCountry") || "";
+    const category = getCategory(getField(row, "procurementCategory"));
+    const entity = getField(row, "contractingEntityName") || "";
+    const awardDate = getField(row, "contractAwardDate") || "";
+    const description = getField(row, "awardDescription-descriptionAttribution-eng") || getField(row, "awardDescription") || "";
+
+    let amount = 0;
+    try { amount = parseFloat((getField(row, "contractAmount") || "0").replace(/,/g, "")) || 0; } catch {}
+
+    // Find existing or create new
+    let existing = null;
+    for (const [key, comp] of companyMap) {
+      if (fuzzyMatch(key, name)) { existing = comp; break; }
+    }
+
+    const contract = { amount, entity, awardDate, category, description: description.substring(0, 200) };
+
+    if (existing) {
+      existing.contracts.push(contract);
+      existing.totalAmount += amount;
+      existing.contractCount++;
+      if (!existing.categories.includes(category)) existing.categories.push(category);
+    } else {
+      companyMap.set(name, {
+        name,
+        city,
+        province,
+        country,
+        category,
+        categories: [category],
+        contracts: [contract],
+        totalAmount: amount,
+        contractCount: 1,
+      });
+    }
+  }
+
+  return Array.from(companyMap.values()).map(c => {
+    const { score, tier, reasons } = scoreCompany(c);
+    return { ...c, score, tier, reasons, id: Math.random().toString(36).substr(2, 9) };
+  });
+}
+
+// ── components ───────────────────────────────────────────────────────
+const TIER_COLORS = {
+  high: { bg: "#0a2e1a", border: "#22c55e", text: "#4ade80", label: "High Fit" },
+  medium: { bg: "#2a2000", border: "#eab308", text: "#facc15", label: "Medium Fit" },
+  low: { bg: "#2a0a0a", border: "#ef4444", text: "#f87171", label: "Low Fit" },
+};
+
+function SearchButton({ href, label, icon, color }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "4px 10px",
+        borderRadius: 6,
+        background: color || "rgba(255,255,255,0.06)",
+        border: "1px solid rgba(255,255,255,0.1)",
+        color: "#e2e8f0",
+        fontSize: 11,
+        fontWeight: 500,
+        textDecoration: "none",
+        whiteSpace: "nowrap",
+        transition: "all 0.15s",
+        cursor: "pointer",
+      }}
+      onMouseEnter={e => { e.target.style.background = "rgba(255,255,255,0.12)"; e.target.style.borderColor = "rgba(255,255,255,0.25)"; }}
+      onMouseLeave={e => { e.target.style.background = color || "rgba(255,255,255,0.06)"; e.target.style.borderColor = "rgba(255,255,255,0.1)"; }}
+    >
+      <span style={{ fontSize: 13 }}>{icon}</span>
+      {label}
+    </a>
+  );
+}
+
+function CompanyCard({ company, isExpanded, onToggle }) {
+  const tc = TIER_COLORS[company.tier];
+  const championTitles = getChampionTitles(company.category);
+
+  return (
+    <div style={{
+      background: "#0f1729",
+      border: `1px solid ${isExpanded ? tc.border : "rgba(255,255,255,0.08)"}`,
+      borderRadius: 10,
+      marginBottom: 8,
+      transition: "all 0.2s",
+    }}>
+      {/* Header row */}
+      <div
+        onClick={onToggle}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          padding: "12px 16px",
+          cursor: "pointer",
+          gap: 12,
+        }}
+      >
+        {/* Score badge */}
+        <div style={{
+          minWidth: 44,
+          height: 44,
+          borderRadius: 8,
+          background: tc.bg,
+          border: `1.5px solid ${tc.border}`,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+        }}>
+          <span style={{ color: tc.text, fontSize: 15, fontWeight: 700, lineHeight: 1 }}>{company.score}</span>
+          <span style={{ color: tc.text, fontSize: 7, fontWeight: 500, textTransform: "uppercase", opacity: 0.8 }}>{tc.label}</span>
+        </div>
+
+        {/* Company info */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: "#f1f5f9", fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {company.name}
+          </div>
+          <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>
+            {[company.city, company.province].filter(Boolean).join(", ")}
+            {company.contractCount > 1 && <span style={{ color: "#64748b" }}>{" "}· {company.contractCount} contracts</span>}
+          </div>
+        </div>
+
+        {/* Category + Amount */}
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{
+            display: "inline-block",
+            padding: "2px 8px",
+            borderRadius: 4,
+            background: "rgba(18,217,249,0.1)",
+            color: "#12D9F9",
+            fontSize: 10,
+            fontWeight: 600,
+            textTransform: "uppercase",
+          }}>
+            {company.category.replace("_", " + ")}
+          </div>
+          {company.totalAmount > 0 && (
+            <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 2 }}>
+              ${company.totalAmount >= 1000000
+                ? (company.totalAmount / 1000000).toFixed(1) + "M"
+                : company.totalAmount >= 1000
+                  ? (company.totalAmount / 1000).toFixed(0) + "K"
+                  : company.totalAmount.toFixed(0)
+              }
+            </div>
+          )}
+        </div>
+
+        {/* Expand arrow */}
+        <div style={{ color: "#64748b", fontSize: 18, transition: "transform 0.2s", transform: isExpanded ? "rotate(180deg)" : "rotate(0)" }}>
+          ▾
+        </div>
+      </div>
+
+      {/* Expanded content */}
+      {isExpanded && (
+        <div style={{ padding: "0 16px 16px", borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+          {/* Search links */}
+          <div style={{ marginTop: 12 }}>
+            <div style={{ color: "#64748b", fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
+              Find the right people
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              <SearchButton
+                href={buildLinkedInPeopleSearch(company.name, championTitles)}
+                label="Champions (BD/Proposals)"
+                icon="🎯"
+                color="rgba(10,102,194,0.15)"
+              />
+              <SearchButton
+                href={buildLinkedInPeopleSearch(company.name, DECISION_TITLES)}
+                label="Decision Makers"
+                icon="👔"
+                color="rgba(10,102,194,0.15)"
+              />
+              <SearchButton
+                href={buildLinkedInCompanySearch(company.name)}
+                label="Company Page"
+                icon="🏢"
+                color="rgba(10,102,194,0.15)"
+              />
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <SearchButton
+                href={buildGoogleWebsiteSearch(company.name, company.city)}
+                label="Find Website"
+                icon="🔍"
+              />
+              <SearchButton
+                href={buildGoogleContactSearch(company.name, company.city, company.province)}
+                label="Contact / Team Page"
+                icon="📇"
+              />
+              <SearchButton
+                href={buildGoogleProcurementSearch(company.name)}
+                label="Procurement History"
+                icon="📋"
+              />
+            </div>
+          </div>
+
+          {/* Contract details */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ color: "#64748b", fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+              Contract details
+            </div>
+            {company.contracts.map((c, i) => (
+              <div key={i} style={{
+                background: "rgba(255,255,255,0.03)",
+                borderRadius: 6,
+                padding: "8px 10px",
+                marginBottom: 4,
+                fontSize: 12,
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <span style={{ color: "#cbd5e1", flex: 1 }}>{c.entity}</span>
+                  <span style={{ color: "#94a3b8", flexShrink: 0, marginLeft: 8 }}>
+                    {c.amount > 0 ? `$${c.amount.toLocaleString()}` : "—"}
+                  </span>
+                </div>
+                {c.awardDate && <div style={{ color: "#64748b", fontSize: 11, marginTop: 2 }}>Awarded: {c.awardDate}</div>}
+                {c.description && <div style={{ color: "#64748b", fontSize: 11, marginTop: 2, fontStyle: "italic" }}>{c.description}</div>}
+              </div>
+            ))}
+          </div>
+
+          {/* ICP scoring reasons */}
+          <div style={{ marginTop: 10, display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {company.reasons.map((r, i) => (
+              <span key={i} style={{
+                padding: "2px 7px",
+                borderRadius: 4,
+                background: "rgba(255,255,255,0.04)",
+                color: "#64748b",
+                fontSize: 10,
+              }}>
+                {r}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── main app ─────────────────────────────────────────────────────────
+export default function App() {
+  const [companies, setCompanies] = useState([]);
+  const [rawCount, setRawCount] = useState(0);
+  const [fileName, setFileName] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
+  const [search, setSearch] = useState("");
+  const [tierFilter, setTierFilter] = useState("all");
+  const [provinceFilter, setProvinceFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [sortBy, setSortBy] = useState("score");
+  const fileRef = useRef(null);
+
+  const handleFile = useCallback((file) => {
+    if (!file) return;
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target.result;
+      const rawRows = parseCSV(text);
+      setRawCount(rawRows.length);
+      const processed = processRows(rawRows);
+      setCompanies(processed);
+      setExpandedId(null);
+      setSearch("");
+      setTierFilter("all");
+      setProvinceFilter("all");
+      setCategoryFilter("all");
+    };
+    reader.readAsText(file, "utf-8");
+  }, []);
+
+  const onDrop = useCallback((e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith(".csv")) handleFile(file);
+  }, [handleFile]);
+
+  const provinces = useMemo(() => {
+    const set = new Set(companies.map(c => c.province).filter(Boolean));
+    return Array.from(set).sort();
+  }, [companies]);
+
+  const categories = useMemo(() => {
+    const set = new Set(companies.map(c => c.category).filter(Boolean));
+    return Array.from(set).sort();
+  }, [companies]);
+
+  const filtered = useMemo(() => {
+    let list = companies;
+    if (tierFilter !== "all") list = list.filter(c => c.tier === tierFilter);
+    if (provinceFilter !== "all") list = list.filter(c => c.province === provinceFilter);
+    if (categoryFilter !== "all") list = list.filter(c => c.category === categoryFilter);
+    if (search) {
+      const s = search.toLowerCase();
+      list = list.filter(c =>
+        c.name.toLowerCase().includes(s) ||
+        c.city.toLowerCase().includes(s) ||
+        c.contracts.some(ct => ct.entity.toLowerCase().includes(s))
+      );
+    }
+    list = [...list].sort((a, b) => {
+      if (sortBy === "score") return b.score - a.score;
+      if (sortBy === "amount") return b.totalAmount - a.totalAmount;
+      if (sortBy === "name") return a.name.localeCompare(b.name);
+      if (sortBy === "contracts") return b.contractCount - a.contractCount;
+      return 0;
+    });
+    return list;
+  }, [companies, tierFilter, provinceFilter, categoryFilter, search, sortBy]);
+
+  const stats = useMemo(() => {
+    if (!companies.length) return null;
+    return {
+      total: companies.length,
+      high: companies.filter(c => c.tier === "high").length,
+      medium: companies.filter(c => c.tier === "medium").length,
+      low: companies.filter(c => c.tier === "low").length,
+      totalValue: companies.reduce((s, c) => s + c.totalAmount, 0),
+      canadian: companies.filter(c => isCanadian(c.country)).length,
+    };
+  }, [companies]);
+
+  const exportCSV = useCallback(() => {
+    const header = ["Company", "City", "Province", "Category", "ICP Score", "ICP Tier", "Total Amount", "Contracts", "Contracting Entities", "LinkedIn Champions", "LinkedIn Decision Makers", "LinkedIn Company", "Google Website", "Google Contact", "Google Procurement"];
+    const rows = filtered.map(c => {
+      const championTitles = getChampionTitles(c.category);
+      return [
+        c.name,
+        c.city,
+        c.province,
+        c.category,
+        c.score,
+        c.tier,
+        c.totalAmount,
+        c.contractCount,
+        c.contracts.map(ct => ct.entity).join("; "),
+        buildLinkedInPeopleSearch(c.name, championTitles),
+        buildLinkedInPeopleSearch(c.name, DECISION_TITLES),
+        buildLinkedInCompanySearch(c.name),
+        buildGoogleWebsiteSearch(c.name, c.city),
+        buildGoogleContactSearch(c.name, c.city, c.province),
+        buildGoogleProcurementSearch(c.name),
+      ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(",");
+    });
+    const csv = [header.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `awardly-leads-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [filtered]);
+
+  // ── styles ──
+  const selectStyle = {
+    background: "rgba(255,255,255,0.05)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 6,
+    color: "#e2e8f0",
+    padding: "6px 10px",
+    fontSize: 12,
+    outline: "none",
+    cursor: "pointer",
+    minWidth: 100,
+  };
+
+  return (
+    <div style={{
+      fontFamily: "'Poppins', 'Segoe UI', sans-serif",
+      background: "linear-gradient(165deg, #070d1b 0%, #0c1428 40%, #0f1832 100%)",
+      minHeight: "100vh",
+      color: "#e2e8f0",
+      padding: 0,
+    }}>
+      <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+      {/* Header */}
+      <div style={{
+        background: "linear-gradient(135deg, #144593 0%, #0c2d66 100%)",
+        borderBottom: "1px solid rgba(18,217,249,0.2)",
+        padding: "20px 24px",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", maxWidth: 900, margin: "0 auto" }}>
+          <div>
+            <h1 style={{
+              fontSize: 20,
+              fontWeight: 700,
+              margin: 0,
+              background: "linear-gradient(135deg, #ffffff 0%, #12D9F9 100%)",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              letterSpacing: "-0.02em",
+            }}>
+              Lead Intelligence Tool
+            </h1>
+            <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 12, margin: "4px 0 0" }}>
+              Drop a CanadaBuys award CSV. Get a scored, searchable prospect list.
+            </p>
+          </div>
+          <div style={{
+            color: "#12D9F9",
+            fontSize: 24,
+            fontWeight: 700,
+            fontStyle: "italic",
+            letterSpacing: "-0.03em",
+            opacity: 0.7,
+          }}>
+            awardly
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px" }}>
+        {/* Upload zone */}
+        {companies.length === 0 ? (
+          <div
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={onDrop}
+            onClick={() => fileRef.current?.click()}
+            style={{
+              border: `2px dashed ${isDragging ? "#12D9F9" : "rgba(255,255,255,0.15)"}`,
+              borderRadius: 14,
+              padding: "60px 40px",
+              textAlign: "center",
+              cursor: "pointer",
+              background: isDragging ? "rgba(18,217,249,0.05)" : "rgba(255,255,255,0.02)",
+              transition: "all 0.2s",
+            }}
+          >
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv"
+              style={{ display: "none" }}
+              onChange={(e) => handleFile(e.target.files[0])}
+            />
+            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.6 }}>📂</div>
+            <div style={{ color: "#f1f5f9", fontSize: 16, fontWeight: 600 }}>
+              Drop a CanadaBuys CSV here
+            </div>
+            <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+              Award notices, tender notices, or any dataset with supplier information
+            </div>
+            <div style={{ color: "#475569", fontSize: 11, marginTop: 16 }}>
+              Supports: awardNotice, tenderNotice CSV exports from CanadaBuys / PSPC
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Stats bar */}
+            {stats && (
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+                gap: 8,
+                marginBottom: 16,
+              }}>
+                {[
+                  { label: "Companies", value: stats.total, sub: `from ${rawCount} rows` },
+                  { label: "High Fit", value: stats.high, color: "#4ade80" },
+                  { label: "Medium Fit", value: stats.medium, color: "#facc15" },
+                  { label: "Low Fit", value: stats.low, color: "#f87171" },
+                  { label: "Total Value", value: `$${(stats.totalValue / 1000000).toFixed(1)}M` },
+                  { label: "Canadian", value: stats.canadian },
+                ].map((s, i) => (
+                  <div key={i} style={{
+                    background: "rgba(255,255,255,0.03)",
+                    border: "1px solid rgba(255,255,255,0.06)",
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    textAlign: "center",
+                  }}>
+                    <div style={{ color: s.color || "#f1f5f9", fontSize: 20, fontWeight: 700 }}>{s.value}</div>
+                    <div style={{ color: "#64748b", fontSize: 10, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.04em" }}>{s.label}</div>
+                    {s.sub && <div style={{ color: "#475569", fontSize: 9, marginTop: 2 }}>{s.sub}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Filters */}
+            <div style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              alignItems: "center",
+              marginBottom: 14,
+              padding: "10px 14px",
+              background: "rgba(255,255,255,0.02)",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.06)",
+            }}>
+              <input
+                type="text"
+                placeholder="Search companies, cities, entities..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{
+                  ...selectStyle,
+                  flex: 1,
+                  minWidth: 180,
+                }}
+              />
+              <select value={tierFilter} onChange={(e) => setTierFilter(e.target.value)} style={selectStyle}>
+                <option value="all">All tiers</option>
+                <option value="high">High fit</option>
+                <option value="medium">Medium fit</option>
+                <option value="low">Low fit</option>
+              </select>
+              <select value={provinceFilter} onChange={(e) => setProvinceFilter(e.target.value)} style={selectStyle}>
+                <option value="all">All provinces</option>
+                {provinces.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+              <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} style={selectStyle}>
+                <option value="all">All categories</option>
+                {categories.map(c => <option key={c} value={c}>{c.replace("_", " + ")}</option>)}
+              </select>
+              <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={selectStyle}>
+                <option value="score">Sort: ICP Score</option>
+                <option value="amount">Sort: Amount</option>
+                <option value="name">Sort: Name</option>
+                <option value="contracts">Sort: # Contracts</option>
+              </select>
+            </div>
+
+            {/* Action bar */}
+            <div style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 12,
+            }}>
+              <span style={{ color: "#64748b", fontSize: 12 }}>
+                Showing {filtered.length} of {companies.length} companies
+              </span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={exportCSV}
+                  style={{
+                    padding: "6px 14px",
+                    borderRadius: 6,
+                    background: "rgba(18,217,249,0.12)",
+                    border: "1px solid rgba(18,217,249,0.3)",
+                    color: "#12D9F9",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  Export CSV with search links
+                </button>
+                <button
+                  onClick={() => {
+                    setCompanies([]);
+                    setFileName("");
+                    setRawCount(0);
+                  }}
+                  style={{
+                    padding: "6px 14px",
+                    borderRadius: 6,
+                    background: "rgba(255,255,255,0.05)",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    color: "#94a3b8",
+                    fontSize: 12,
+                    fontWeight: 500,
+                    cursor: "pointer",
+                  }}
+                >
+                  New upload
+                </button>
+              </div>
+            </div>
+
+            {/* Company list */}
+            <div>
+              {filtered.map(company => (
+                <CompanyCard
+                  key={company.id}
+                  company={company}
+                  isExpanded={expandedId === company.id}
+                  onToggle={() => setExpandedId(expandedId === company.id ? null : company.id)}
+                />
+              ))}
+              {filtered.length === 0 && (
+                <div style={{ textAlign: "center", padding: 40, color: "#475569" }}>
+                  No companies match your filters.
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
