@@ -1,4 +1,4 @@
-export const article = {
+{
   "id": "rfp-vs-rfq-canadian-procurement-guide-2026",
   "slug": "rfp-vs-rfq-canadian-procurement-guide-2026",
   "title": "RFP vs RFQ: A Canadian Procurement Guide for 2026",
@@ -72,4 +72,4 @@ export const article = {
     "CanadaBuys"
   ],
   "readTime": "10 min read"
-};
+}
