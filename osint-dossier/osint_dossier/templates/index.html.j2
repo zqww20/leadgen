@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osint-dossier</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --txt:#e6e8ec; --mut:#9aa3b2; --accent:#5b9dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  .wrap { max-width:720px; margin:0 auto; padding:32px 20px 80px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  p.sub { color:var(--mut); margin:0 0 24px; }
+  form { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:22px; }
+  label { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--mut); margin:14px 0 4px; }
+  input[type=text] { width:100%; padding:9px 11px; background:#0f1218; border:1px solid var(--line); border-radius:6px; color:var(--txt); font-size:14px; }
+  .row { display:flex; gap:12px; } .row > div { flex:1; }
+  .req { color:var(--accent); }
+  .consent { margin-top:16px; font-size:13px; color:var(--mut); }
+  button { margin-top:20px; width:100%; padding:12px; background:var(--accent); color:#06101f; border:0; border-radius:6px; font-size:15px; font-weight:600; cursor:pointer; }
+  .err { background:#3a1d1d; border:1px solid #ff6b6b; color:#ffb0b0; padding:10px 14px; border-radius:6px; margin-bottom:16px; font-size:13px; }
+  .status { margin-top:26px; font-size:12px; color:var(--mut); }
+  .status b { color:var(--txt); } .status .on { color:#69d08a; } .status .off { color:#6b7280; }
+  code { background:#0f1218; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>osint-dossier</h1>
+  <p class="sub">People OSINT / due-diligence · Canada. Backend runs every enabled source and assembles a dossier.</p>
+
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+  <form method="post" action="/run">
+    <label>Full name <span class="req">*required</span></label>
+    <input type="text" name="name" required placeholder="Jane Doe">
+
+    <label>Lawful basis <span class="req">*required</span></label>
+    <input type="text" name="basis" required placeholder="corporate due diligence, engagement #1234, consent on file">
+
+    <div class="row">
+      <div><label>Location</label><input type="text" name="location" placeholder="Vancouver, BC"></div>
+      <div><label>Province</label><input type="text" name="province" placeholder="BC"></div>
+    </div>
+    <div class="row">
+      <div><label>Email(s)</label><input type="text" name="email" placeholder="comma-separated"></div>
+      <div><label>Phone(s)</label><input type="text" name="phone" placeholder="comma-separated"></div>
+    </div>
+    <div class="row">
+      <div><label>Employer</label><input type="text" name="employer"></div>
+      <div><label>Username(s)</label><input type="text" name="username" placeholder="comma-separated"></div>
+    </div>
+    <label>Operator</label>
+    <input type="text" name="operator" placeholder="your name (audit log)">
+
+    <div class="consent">
+      <label style="display:inline"><input type="checkbox" name="consent"> Subject has given informed consent</label>
+      (required to run the Certn criminal check)
+    </div>
+
+    <button type="submit">Run investigation</button>
+  </form>
+
+  <div class="status">
+    <b>Connectors</b><br>
+    {% for r in status %}
+      <span class="{{ 'on' if r.enabled == 'yes' else 'off' }}">{{ '●' if r.enabled == 'yes' else '○' }} {{ r.connector }}</span>
+      — {{ r.detail }}<br>
+    {% endfor %}
+    <br>Enable paid sources by adding keys to <code>.env</code> and restarting.
+  </div>
+</div>
+</body>
+</html>

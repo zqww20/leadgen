@@ -1,0 +1,14 @@
+# Secrets — never commit real keys
+.env
+
+# Generated case files may contain personal data — keep them local
+cases/*
+!cases/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
