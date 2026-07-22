@@ -25,6 +25,7 @@ KEY_FOR = {
     "gdelt": None,
     "username_osint": None,
     "manual_sources": None,
+    "watchlists_free": None,                     # free sanctions/PEP via official public lists
     "opensanctions": "OPENSANCTIONS_API_KEY",   # or self-host via OPENSANCTIONS_BASE_URL
     "pipl": "PIPL_API_KEY",
     "peopledatalabs": "PDL_API_KEY",

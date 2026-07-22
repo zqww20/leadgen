@@ -12,9 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from osint_dossier import config, report  # noqa: E402
+from osint_dossier import config, report, verification  # noqa: E402
 from osint_dossier.audit import LawfulBasisError, require_basis  # noqa: E402
 from osint_dossier.connectors.manual_sources import ManualSources  # noqa: E402
+from osint_dossier.connectors import watchlists_free as wf  # noqa: E402
 from osint_dossier.models import Dossier, Finding, Subject  # noqa: E402
 
 
@@ -62,6 +63,34 @@ def test_dossier_render_and_save():
 
     summary = report.terminal_summary(d)
     assert "Jane Doe" in summary and d.case_id in summary
+
+
+def test_watchlist_scoring():
+    assert wf.score("John Smith", "SMITH, John") == 1.0          # token-order invariant
+    assert wf.score("Jose Ramirez", "José Ramírez") == 1.0        # accent-fold
+    assert wf.score("John Smith", "John Smith Jr") >= 0.9         # subset containment
+    assert wf.score("John Smith", "Vladimir Petrov") < 0.6        # unrelated
+
+
+def test_watchlist_parsers():
+    sdn = b'1,"SMITH, John","individual","UKRAINE-EO13662","-0-"\n2,"ACME LTD","entity","IRAN","-0-"'
+    entries = wf.parse_ofac_sdn(sdn)
+    assert len(entries) == 2 and entries[0].name == "SMITH, John"
+
+    un = (b'<CONSOLIDATED_LIST><INDIVIDUALS>'
+          b'<INDIVIDUAL><FIRST_NAME>John</FIRST_NAME><SECOND_NAME>Smith</SECOND_NAME>'
+          b'<UN_LIST_TYPE>Al-Qaida</UN_LIST_TYPE></INDIVIDUAL>'
+          b'</INDIVIDUALS><ENTITIES></ENTITIES></CONSOLIDATED_LIST>')
+    ue = wf.parse_un_consolidated(un)
+    assert ue and ue[0].name == "John Smith"
+
+
+def test_verification_pack():
+    with tempfile.TemporaryDirectory() as tmp:
+        written = verification.generate(Subject(name="Jane Doe", employer="ACME"), Path(tmp))
+        assert len(written) == 5
+        consent = next(p for p in written if "consent" in p.name).read_text(encoding="utf-8")
+        assert "Jane Doe" in consent and "PIPEDA" in consent
 
 
 def _run_all():

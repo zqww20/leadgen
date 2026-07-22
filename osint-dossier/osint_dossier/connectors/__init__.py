@@ -8,6 +8,7 @@ from .orgbook_bc import OrgBookBC
 from .opencorporates import OpenCorporates
 from .opensanctions import OpenSanctions
 from .complyadvantage import ComplyAdvantage
+from .watchlists_free import FreeWatchlists
 from .certn import Certn
 from .gdelt import Gdelt
 from .username_osint import UsernameOsint
@@ -21,6 +22,7 @@ ALL_CONNECTORS: list[type[Connector]] = [
     OrgBookBC,
     OpenCorporates,
     # sanctions / PEP
+    FreeWatchlists,   # free, keyless — screens official public lists
     OpenSanctions,
     ComplyAdvantage,
     # litigation (consent-gated)

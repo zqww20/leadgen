@@ -53,6 +53,15 @@ class ManualSources(Connector):
             ("LinkedIn people search",
              f"https://www.linkedin.com/search/results/people/?keywords={q}",
              "Confirm employment / professional history."),
+            ("Facebook people search",
+             f"https://www.facebook.com/search/people/?q={q}",
+             "Public profile / social footprint."),
+            ("Canada411 — reverse name lookup",
+             f"https://www.canada411.ca/search/?stype=si&what={q}",
+             "Free Canadian phone / address directory."),
+            ("Google — professional register / licence",
+             f"https://www.google.com/search?q={quoted}+(license+OR+registration+OR+college+OR+association)",
+             "Find a free public professional register to verify credentials."),
         ]
         findings = [
             Finding(

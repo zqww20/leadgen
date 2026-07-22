@@ -8,10 +8,26 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import config, report
+from . import config, report, verification
 from .audit import LawfulBasisError
 from .core import investigate
 from .models import Subject
+
+# What this tool covers vs Certn's paid catalogue (CAD prices from certn.co).
+_COVERAGE = [
+    ("SoftCheck / Public Records", "$9.99", "watchlists_free + gdelt", "FREE"),
+    ("Social Media Check", "$59.99", "username_osint + manual links", "FREE (manual)"),
+    ("Employment Verification", "$29.99", "--verify-pack", "FREE (DIY)"),
+    ("Education Verification", "$29.99", "--verify-pack", "FREE (DIY)"),
+    ("Credential Verification", "$29.99", "--verify-pack + public registers", "FREE (DIY)"),
+    ("Reference Check (digital)", "$4.49", "--verify-pack", "FREE (DIY)"),
+    ("Criminal record leads", "—", "manual_sources (CanLII/courts)", "FREE (partial)"),
+    ("Corporate footprint", "—", "orgbook_bc / opencorporates", "FREE / paid"),
+    ("OneID identity verification", "$4.99", "cheap vendors (Didit ~$0.33)", "CHEAP"),
+    ("Criminal Record Check (CPIC)", "$24.99", "certn (consent)", "MUST PAY — law"),
+    ("Credit Report", "$12.99", "certn / bureau (consent)", "MUST PAY — law"),
+    ("Driver's Abstract / MVR", "$35.99", "provincial (consent)", "MUST PAY — law"),
+]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -34,6 +50,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--consent", action="store_true",
                    help="Assert the subject's informed consent (unlocks Certn criminal check)")
     p.add_argument("--status", action="store_true", help="Show connector enable/disable status and exit")
+    p.add_argument("--coverage", action="store_true", help="Show what this tool covers vs Certn's paid catalogue and exit")
+    p.add_argument("--verify-pack", action="store_true",
+                   help="Also generate the DIY verification pack (consent form + questionnaires)")
     return p
 
 
@@ -45,11 +64,23 @@ def _print_status() -> None:
     print()
 
 
+def _print_coverage() -> None:
+    print(f"\n  {'Certn product':<30}{'Certn $':<10}{'This tool':<34}Verdict")
+    print("  " + "-" * 90)
+    for product, price, how, verdict in _COVERAGE:
+        print(f"  {product:<30}{price:<10}{how:<34}{verdict}")
+    print("\n  FREE/CHEAP = do it yourself with this tool. MUST PAY = consent-gated by law.\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.status:
         _print_status()
+        return 0
+
+    if args.coverage:
+        _print_coverage()
         return 0
 
     if not args.name:
@@ -81,7 +112,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(report.terminal_summary(dossier))
     paths = report.save(dossier)
-    print(f"  report saved:\n    {paths['html']}\n    {paths['json']}\n")
+    print(f"  report saved:\n    {paths['html']}\n    {paths['json']}")
+    if args.verify_pack:
+        written = verification.generate(subject, paths["dir"])
+        print(f"  verification pack ({len(written)} files):\n    {written[0].parent}/")
+    print()
     return 0
 
 
